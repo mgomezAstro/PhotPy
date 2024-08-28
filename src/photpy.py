@@ -10,12 +10,18 @@ import numpy as np
 import warnings
 from astropy.io import fits
 from astropy.wcs import WCS
+from astropy.time import Time
 from astropy.table import Table
 from astropy.coordinates import SkyCoord
 from astropy.stats import sigma_clipped_stats, SigmaClip
 from astropy.modeling import models, fitting
 from astropy.utils.exceptions import AstropyUserWarning
-from photutils.aperture import CircularAperture, aperture_photometry
+from photutils.aperture import (
+    CircularAperture,
+    aperture_photometry,
+    CircularAnnulus,
+    ApertureStats,
+)
 from photutils.background import (
     Background2D,
     MedianBackground,
@@ -113,25 +119,13 @@ class PhotPy:
         _, bkg, bkg_std = sigma_clipped_stats(self.data, sigma=sigma)
         starfinder = IRAFStarFinder(threshold * bkg_std, fwhm)
         self.sources = starfinder(self.data - self.data_bkg)
-
-        # Plotting sources
-        # positions = np.transpose(
-        #     (self.sources["xcentroid"], self.sources["ycentroid"])
-        # )
-        # apertures = CircularAperture(positions, r=7.0)
-        # plt.imshow(
-        #     self.data - self.data_bkg,
-        #     origin="lower",
-        #     norm="asinh",
-        #     cmap="Greys",
-        # )
-        # apertures.plot(color="red", lw=1.5, alpha=0.5)
+        self.sources["mjd"] = Time(self.hdr["DATE-OBS"]).mjd
 
     def __cog(
         self, aper_min: float, aper_max: float, n_aper: int, aper_id: int
     ):
 
-        mask_roundness = self.sources["roundness"] <= 0.1
+        mask_roundness = self.sources["roundness"] <= 0.2
         positions = np.transpose(
             (
                 self.sources["xcentroid"][mask_roundness],
@@ -186,7 +180,7 @@ class PhotPy:
 
         return moffat_fit, radii[aper_id]
 
-    def get_field_photometry(
+    def get_cog_photometry(
         self,
         phot_type: str = "aperture",
         aper_min: float = 1.5,
@@ -219,10 +213,49 @@ class PhotPy:
         x_model = np.linspace(aper, 60, 1000)
         aper_corr = np.trapezoid(aper_corr_fn(x_model), x_model)
 
-        self.sources["mag"] = 25.0 + mag + aper_corr
+        self.sources["mag"] = mag + aper_corr
         self.sources["e_mag"] = e_mag
         self.sources["flux"] = flux
         self.sources["e_flux"] = e_flux
+
+    def get_simple_photometry(self, aper: float = None, annulus: list = None):
+        fwhm = np.nanmedian(self.sources["fwhm"])
+        positions = np.transpose(
+            (self.sources["xcentroid"], self.sources["ycentroid"])
+        )
+        aper_pix = CircularAperture(positions, fwhm * 1.5)
+        aper_annulus_pix = CircularAnnulus(positions, fwhm * 2.5, fwhm * 4.0)
+
+        if aper is not None:
+            aper_pix = CircularAperture(positions, aper)
+            aper_annulus_pix = CircularAnnulus(
+                positions, annulus[0], annulus[1]
+            )
+
+        sigclip = SigmaClip(sigma=3.0, maxiters=10)
+        aper_stats = ApertureStats(self.data, aper_pix, sigma_clip=None)
+        bkg_stats = ApertureStats(
+            self.data, aper_annulus_pix, sigma_clip=sigclip
+        )
+
+        total_bkg = bkg_stats.median * aper_stats.sum_aper_area.value
+        aper_sum_bksub = aper_stats.sum - total_bkg
+
+        flux = aper_sum_bksub / float(self.hdr["EXPTIME"])
+        mag = -2.5 * np.log10(flux)
+        e_flux = np.sqrt(
+            flux + aper_stats.sum_aper_area.value * bkg_stats.std**2
+        )
+        e_mag = np.abs(
+            -2.5 * np.log10((aper_sum_bksub + e_flux) / self.hdr["EXPTIME"])
+            - mag
+        )
+
+        self.sources["mag"] = mag
+        self.sources["e_mag"] = e_mag
+        self.sources["flux"] = flux
+        self.sources["e_flux"] = e_flux
+        self.sources["bkg"] = total_bkg
 
     def pix_to_wcs(self):
         positions = np.transpose(
@@ -256,10 +289,14 @@ class PhotPy:
         if make_report:
             pass
 
-    def run_pipe(self):
-        self.get_background(bkg_type="median_bkg", box_size=(15, 15))
-        self.get_field_sources()
-        self.get_field_photometry()
+    def run_pipe(self, phot_type: str):
+        if phot_type == "simple":
+            self.get_field_sources()
+            self.get_simple_photometry()
+        else:
+            self.get_background(bkg_type="median_bkg", box_size=(15, 15))
+            self.get_field_sources()
+            self.get_cog_photometry()
         self.pix_to_wcs()
         self.save()
 
