@@ -113,23 +113,38 @@ class PhotPy:
         else:
             raise ValueError(f"Background must be one of this: {bkg_options}.")
 
-    def get_field_sources(
-        self, threshold: float = 5.0, fwhm: float = 5.5, sigma: float = 3.0
-    ):
-        _, bkg, bkg_std = sigma_clipped_stats(self.data, sigma=sigma)
-        starfinder = IRAFStarFinder(threshold * bkg_std, fwhm)
+    def __clean_sources(self):
+        mask_roundness = np.abs(self.sources["roundness"]) <= 0.2
+        self.sources = self.sources[mask_roundness]
+
+        mask_sky = self.sources["sky"] > 0.0
+        self.sources = self.sources[mask_sky]
+
+    def get_field_sources(self, threshold: float = 5.0, fwhm: float = 5.5):
+        _, _, std = sigma_clipped_stats(
+            self.data - self.data_bkg, sigma=3.0, stdfunc="mad_std"
+        )
+        starfinder = IRAFStarFinder(
+            threshold * std,
+            fwhm,
+            sharphi=0.8,
+            sharplo=0.5,
+            exclude_border=True,
+            roundhi=0.2,
+            roundlo=-0.2,
+        )
         self.sources = starfinder(self.data - self.data_bkg)
         self.sources["mjd"] = Time(self.hdr["DATE-OBS"]).mjd
+
+        # self.__clean_sources()
 
     def __cog(
         self, aper_min: float, aper_max: float, n_aper: int, aper_id: int
     ):
-
-        mask_roundness = self.sources["roundness"] <= 0.2
         positions = np.transpose(
             (
-                self.sources["xcentroid"][mask_roundness],
-                self.sources["ycentroid"][mask_roundness],
+                self.sources["ycentroid"],
+                self.sources["xcentroid"],
             )
         )
         radii = np.linspace(aper_min, aper_max, n_aper)
