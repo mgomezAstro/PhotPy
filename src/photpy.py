@@ -36,7 +36,11 @@ from astroquery.vizier import Vizier
 
 
 class PhotPy:
-    def __init__(self, input_file: str, ext: int = 0):
+    def __init__(
+        self,
+        input_file: str,
+        ext: int = 0,
+    ):
         self.input_file = input_file
         self.data = fits.getdata(self.input_file, ext=ext)
         self.hdr = fits.getheader(self.input_file, ext=ext)
@@ -113,30 +117,33 @@ class PhotPy:
         else:
             raise ValueError(f"Background must be one of this: {bkg_options}.")
 
-    def __clean_sources(self):
-        mask_roundness = np.abs(self.sources["roundness"]) <= 0.2
-        self.sources = self.sources[mask_roundness]
-
-        mask_sky = self.sources["sky"] > 0.0
-        self.sources = self.sources[mask_sky]
-
-    def get_field_sources(self, threshold: float = 5.0, fwhm: float = 5.5):
+    def get_field_sources(
+        self,
+        threshold: float = 5.0,
+        fwhm: float = 5.5,
+        sharplo: float = 0.5,
+        sharphi: float = 0.8,
+        roundlo: float = 0.0,
+        roundhi: float = 0.2,
+    ):
         _, _, std = sigma_clipped_stats(
             self.data - self.data_bkg, sigma=3.0, stdfunc="mad_std"
         )
         starfinder = IRAFStarFinder(
             threshold * std,
             fwhm,
-            sharphi=0.8,
-            sharplo=0.5,
+            sharphi=sharphi,
+            sharplo=sharplo,
             exclude_border=True,
-            roundhi=0.2,
-            roundlo=-0.2,
+            roundhi=roundhi,
+            roundlo=roundlo,
         )
         self.sources = starfinder(self.data - self.data_bkg)
+        if self.sources is None:
+            raise ValueError(
+                "Did not found any source in the field. Try another get_field_sources configuration."
+            )
         self.sources["mjd"] = Time(self.hdr["DATE-OBS"]).mjd
-
-        # self.__clean_sources()
 
     def __cog(
         self, aper_min: float, aper_max: float, n_aper: int, aper_id: int
@@ -304,7 +311,7 @@ class PhotPy:
         if make_report:
             pass
 
-    def run_pipe(self, phot_type: str):
+    def run_pipe(self, phot_type: str = "simple"):
         if phot_type == "simple":
             self.get_field_sources()
             self.get_simple_photometry()
