@@ -122,7 +122,7 @@ class PhotPy:
         threshold: float = 5.0,
         fwhm: float = 5.5,
         sharplo: float = 0.5,
-        sharphi: float = 0.8,
+        sharphi: float = 2.0,
         roundlo: float = 0.0,
         roundhi: float = 0.2,
     ):
@@ -365,9 +365,15 @@ def calibrate(
     tab["_RAJ2000"].unit = "deg"
     tab["_DEJ2000"].unit = "deg"
 
+    if len(tab) > 50:
+        tab.sort("mag")
+        copy_tab = tab[:50]
+    else:
+        copy_tab = tab.copy()
+
     catalog = Vizier(
         catalog=vizier_catalog, column_filters=constrains
-    ).query_region(tab, radius="3s")[0]
+    ).query_region(copy_tab, radius="3s")[0]
     catalog = catalog[~np.isnan(catalog[band])]
     catalog = catalog[~np.isnan(catalog["e_" + band])]
     catalog.write("ref_" + input_table, format="ascii.csv", overwrite=True)
