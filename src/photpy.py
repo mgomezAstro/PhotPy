@@ -146,6 +146,24 @@ class PhotPy:
             )
         self.sources["mjd"] = Time(self.hdr["DATE-OBS"]).mjd
 
+        positions = np.transpose(
+            [self.sources["xcentronid"], self.sources["ycentroid"]]
+        )
+        apers = CircularAperture(positions, r=5.0)
+        median = np.nanmediabn(self.data)
+        stddev = np.nanstd(self.data)
+        plt.plot(
+            self.data,
+            origin="lower",
+            vmin=median - 0.5 * stddev,
+            vmax=median + 0.5 * stddev,
+        )
+        apers.plot(color="red", alpha=0.5, lw=1.0)
+        plt.xlabe("x [pixels]")
+        plt.ylabel("y [pixels]")
+        plt.savefig(self.input_file.replace(".fits", "_findsources.png"))
+        plt.close()
+
     def __cog(self, aper_min: float, aper_max: float, n_aper: int, aper_id: int):
         positions = np.transpose(
             (
