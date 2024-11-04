@@ -7,6 +7,7 @@ Created on Sat Aug 17 17:28:36 2024
 @email: mgomez@icc.ub.edu; mgomez_astro@outlook.com
 """
 import numpy as np
+from scipy.stats import median_abs_deviation
 import warnings
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -32,7 +33,7 @@ from photutils.background import (
 from photutils.detection import IRAFStarFinder
 from astroquery.vizier import Vizier
 
-# import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
 
 
 class PhotPy:
@@ -145,9 +146,7 @@ class PhotPy:
             )
         self.sources["mjd"] = Time(self.hdr["DATE-OBS"]).mjd
 
-    def __cog(
-        self, aper_min: float, aper_max: float, n_aper: int, aper_id: int
-    ):
+    def __cog(self, aper_min: float, aper_max: float, n_aper: int, aper_id: int):
         positions = np.transpose(
             (
                 self.sources["ycentroid"],
@@ -160,10 +159,7 @@ class PhotPy:
         phot = aperture_photometry(self.data - self.data_bkg, apertures)
 
         mk = np.asarray([])
-        rk = (
-            np.asarray([radii[i] + radii[i - 1] for i in range(1, len(radii))])
-            / 2.0
-        )
+        rk = np.asarray([radii[i] + radii[i - 1] for i in range(1, len(radii))]) / 2.0
 
         xx = []
         yy = []
@@ -211,9 +207,7 @@ class PhotPy:
         aper_id: int = 3,
     ):
         aper_corr_fn, aper = self.__cog(aper_min, aper_max, n_aper, aper_id)
-        positions = np.transpose(
-            (self.sources["xcentroid"], self.sources["ycentroid"])
-        )
+        positions = np.transpose((self.sources["xcentroid"], self.sources["ycentroid"]))
 
         # TODO: implement PSF photometry
         if phot_type == "aperture":
@@ -228,9 +222,7 @@ class PhotPy:
             mag = -2.5 * np.log10(flux)
             e_mag = 0.434 * e_flux / flux
         else:
-            raise ValueError(
-                f"No recognized phot_tyoe. Your input: {phot_type}"
-            )
+            raise ValueError(f"No recognized phot_tyoe. Your input: {phot_type}")
 
         x_model = np.linspace(aper, 60, 1000)
         aper_corr = np.trapezoid(aper_corr_fn(x_model), x_model)
@@ -242,35 +234,35 @@ class PhotPy:
 
     def get_simple_photometry(self, aper: float = None, annulus: list = None):
         fwhm = np.nanmedian(self.sources["fwhm"])
-        positions = np.transpose(
-            (self.sources["xcentroid"], self.sources["ycentroid"])
-        )
+        print(f"Global FWHM: {fwhm:.2f}")
+        positions = np.transpose((self.sources["xcentroid"], self.sources["ycentroid"]))
         aper_pix = CircularAperture(positions, fwhm * 1.5)
         aper_annulus_pix = CircularAnnulus(positions, fwhm * 2.5, fwhm * 4.0)
 
         if aper is not None:
             aper_pix = CircularAperture(positions, aper)
-            aper_annulus_pix = CircularAnnulus(
-                positions, annulus[0], annulus[1]
-            )
+            aper_annulus_pix = CircularAnnulus(positions, annulus[0], annulus[1])
 
-        sigclip = SigmaClip(sigma=3.0, maxiters=10)
+        sigclip = SigmaClip(sigma=3.0)
         aper_stats = ApertureStats(self.data, aper_pix, sigma_clip=None)
-        bkg_stats = ApertureStats(
-            self.data, aper_annulus_pix, sigma_clip=sigclip
-        )
+        bkg_stats = ApertureStats(self.data, aper_annulus_pix, sigma_clip=sigclip)
 
         total_bkg = bkg_stats.median * aper_stats.sum_aper_area.value
         aper_sum_bksub = aper_stats.sum - total_bkg
 
-        flux = aper_sum_bksub / float(self.hdr["EXPTIME"])
+        gain = 1.0
+        if "GAIN" in self.hdr:
+            gain = float(self.hdr["GAIN"])
+        flux = gain * aper_sum_bksub / float(self.hdr["EXPTIME"])
         mag = -2.5 * np.log10(flux)
-        e_flux = np.sqrt(
-            flux + aper_stats.sum_aper_area.value * bkg_stats.std**2
-        )
+
+        e_flux = np.sqrt(flux + aper_stats.sum_aper_area.value * bkg_stats.mad_std**2)
+        # e_mag = np.abs(
+        #     -2.5 * np.log10((aper_sum_bksub + e_flux) / self.hdr["EXPTIME"]) - mag
+        # )
         e_mag = np.abs(
-            -2.5 * np.log10((aper_sum_bksub + e_flux) / self.hdr["EXPTIME"])
-            - mag
+            mag
+            - (-2.5 * np.log10(gain * (aper_sum_bksub + e_flux) / self.hdr["EXPTIME"]))
         )
 
         self.sources["mag"] = mag
@@ -280,9 +272,7 @@ class PhotPy:
         self.sources["bkg"] = total_bkg
 
     def pix_to_wcs(self):
-        positions = np.transpose(
-            (self.sources["xcentroid"], self.sources["ycentroid"])
-        )
+        positions = np.transpose((self.sources["xcentroid"], self.sources["ycentroid"]))
 
         wcs = WCS(self.hdr)
 
@@ -329,6 +319,8 @@ def calibrate(
     band: str,
     constrains: dict,
     coords: tuple | list,
+    plot_obj: bool = False,
+    fitsfile: str = None,
 ):
     """
 
@@ -365,14 +357,19 @@ def calibrate(
     tab["_RAJ2000"].unit = "deg"
     tab["_DEJ2000"].unit = "deg"
 
-    if len(tab) > 50:
-        tab.sort("mag")
-        copy_tab = tab[:50]
+    mask = tab["e_mag"] < 0.05
+    copy_tab = tab[mask].copy()
+    if len(copy_tab) > 150:
+        copy_tab.sort("mag")
+        copy_tab = copy_tab[:150]
     else:
-        copy_tab = tab.copy()
+        copy_tab = copy_tab.copy()
+    print("Total matching: ", mask.sum())
 
     catalog = Vizier(
-        catalog=vizier_catalog, column_filters=constrains
+        catalog=vizier_catalog,
+        column_filters=constrains,
+        columns=["all", "_RAJ2000", "_DEJ2000"],
     ).query_region(copy_tab, radius="3s")[0]
     catalog = catalog[~np.isnan(catalog[band])]
     catalog = catalog[~np.isnan(catalog["e_" + band])]
@@ -381,30 +378,74 @@ def calibrate(
 
     c_tab = SkyCoord(tab["ra"], tab["dec"], unit="deg")
     mag_difs = []
+    catalog["mag"] = -99.0
+    catalog["e_mag"] = -99.0
     for i in range(len(catalog)):
-        c = SkyCoord(catalog["RAJ2000"][i], catalog["DEJ2000"][i], unit="deg")
+        c = SkyCoord(catalog["_RAJ2000"][i], catalog["_DEJ2000"][i], unit="deg")
         tab["sep"] = c_tab.separation(c).arcsec
         mask = tab["sep"] == tab["sep"].min()
+        catalog["mag"][i] = tab["mag"][mask]
+        catalog["e_mag"][i] = tab["e_mag"][mask]
         mag_difs.append(catalog[band][i].data - tab["mag"][mask].data)
 
     ZP = np.nanmedian(mag_difs)
-    e_ZP = np.nanmedian(np.abs(mag_difs - ZP))
+    e_ZP = median_abs_deviation(mag_difs, nan_policy="omit")[0]
 
     print(f"ZP {band}: {ZP:.4f} +- {e_ZP:.4f}")
 
-    tab[band] = tab["mag"] + ZP
-    tab[band].info.format = ".4f"
-    tab[f"e_{band}"] = np.sqrt(tab["e_mag"] ** 2 + e_ZP**2)
-    tab[f"e_{band}"].info.format = ".4f"
+    tab["m_" + band] = tab["mag"] + ZP
+    tab["m_" + band].info.format = ".4f"
+    tab[f"e_m_{band}"] = np.sqrt(tab["e_mag"] ** 2 + e_ZP**2)
+    tab[f"e_m_{band}"].info.format = ".4f"
     tab["ZP"] = ZP
     tab["ZP"].info.format = ".4f"
     tab["e_ZP"] = e_ZP
     tab["e_ZP"].info.format = ".4f"
 
+    plt.errorbar(
+        catalog["mag"] + ZP,
+        catalog[band],
+        xerr=catalog["e_mag"],
+        yerr=catalog["e_" + band],
+        marker="o",
+        ls="",
+        label="ref catalog",
+    )
+    xx = [catalog[band].min(), catalog[band].max()]
+    plt.plot(xx, xx, color="red", lw=1.0, label=f"ZP = {ZP:.2f}")
+    plt.xlabel(f"Inst. photometry {band} [mag]")
+    plt.ylabel(f"{vizier_catalog} {band} [mag]")
+    plt.savefig(input_table.replace(".csv", "_plot.png"))
+    plt.close()
+
     my_obj[band] = my_obj["mag"] + ZP
     my_obj[band].info.format = ".4f"
     my_obj[f"e_{band}"] = np.sqrt(my_obj["e_mag"] ** 2 + e_ZP**2)
     my_obj[f"e_{band}"].info.format = ".4f"
+
+    if plot_obj and fitsfile is not None:
+        data = fits.getdata(fitsfile)
+        stddev = np.nanstd(data)
+        median = np.nanmedian(data)
+
+        aper = CircularAperture(
+            ((my_obj["xcentroid"][0], my_obj["ycentroid"][0])), r=5.0
+        )
+
+        plt.imshow(
+            data,
+            origin="lower",
+            interpolation="nearest",
+            vmin=median - 0.5 * stddev,
+            vmax=median + 0.5 * stddev,
+        )
+        aper.plot(color="red", lw=1.0, alpha=0.5)
+        plt.xlim(my_obj["xcentroid"][0] - 25, my_obj["xcentroid"][0] + 25)
+        plt.ylim(my_obj["ycentroid"][0] - 25, my_obj["ycentroid"][0] + 25)
+        plt.xlabel("x [pixel]")
+        plt.ylabel("y [pixel]")
+        plt.savefig(input_table.replace(".csv", "_im+aper.png"))
+        plt.close()
 
     tab.write(
         input_table.replace(".csv", "_cal.csv"),
