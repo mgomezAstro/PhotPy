@@ -146,20 +146,18 @@ class PhotPy:
             )
         self.sources["mjd"] = Time(self.hdr["DATE-OBS"]).mjd
 
-        positions = np.transpose(
-            [self.sources["xcentronid"], self.sources["ycentroid"]]
-        )
+        positions = np.transpose([self.sources["xcentroid"], self.sources["ycentroid"]])
         apers = CircularAperture(positions, r=5.0)
-        median = np.nanmediabn(self.data)
+        median = np.nanmedian(self.data)
         stddev = np.nanstd(self.data)
-        plt.plot(
+        plt.imshow(
             self.data,
             origin="lower",
             vmin=median - 0.5 * stddev,
             vmax=median + 0.5 * stddev,
         )
         apers.plot(color="red", alpha=0.5, lw=1.0)
-        plt.xlabe("x [pixels]")
+        plt.xlabel("x [pixels]")
         plt.ylabel("y [pixels]")
         plt.savefig(self.input_file.replace(".fits", "_findsources.png"))
         plt.close()
@@ -283,6 +281,9 @@ class PhotPy:
             - (-2.5 * np.log10(gain * (aper_sum_bksub + e_flux) / self.hdr["EXPTIME"]))
         )
 
+        self.sources["aper"] = aper_pix.r
+        self.sources["r_in"] = aper_annulus_pix.r_in
+        self.sources["r_out"] = aper_annulus_pix.r_out
         self.sources["mag"] = mag
         self.sources["e_mag"] = e_mag
         self.sources["flux"] = flux
@@ -427,12 +428,13 @@ def calibrate(
         yerr=catalog["e_" + band],
         marker="o",
         ls="",
-        label="ref catalog",
+        label=f"{band} (ZP = {ZP:.2f}+-{e_ZP:.2f})",
     )
     xx = [catalog[band].min(), catalog[band].max()]
-    plt.plot(xx, xx, color="red", lw=1.0, label=f"ZP = {ZP:.2f}")
+    plt.plot(xx, xx, color="red", lw=1.0, label=f"1:1 ")
     plt.xlabel(f"Inst. photometry {band} [mag]")
     plt.ylabel(f"{vizier_catalog} {band} [mag]")
+    plt.legend()
     plt.savefig(input_table.replace(".csv", "_plot.png"))
     plt.close()
 
