@@ -271,9 +271,9 @@ class PhotPy:
             aper_pix = CircularAperture(positions, aper)
             aper_annulus_pix = CircularAnnulus(positions, annulus[0], annulus[1])
 
-        sigclip = SigmaClip(sigma=3.0, maxiters=10)
+        sigclip = SigmaClip(sigma=3.0) #, maxiters=10)
         aper_stats = ApertureStats(self.data - self.data_bkg, aper_pix, sigma_clip=None)
-        bkg_stats = ApertureStats(self.data - self.data_bkg, aper_annulus_pix, sigma_clip=sigclip)
+        bkg_stats = ApertureStats(self.data - self.data_bkg, aper_annulus_pix) #, sigma_clip=sigclip)
 
         total_bkg = bkg_stats.median * aper_stats.sum_aper_area.value
         aper_sum_bksub = aper_stats.sum - total_bkg
@@ -368,6 +368,7 @@ def calibrate(
     constrains: dict,
     coords: tuple | list,
     use_pol_fit: bool = False,
+    obs_limits: dict | None = None,
     # color_term : None | str = None,
 ):
     """
@@ -405,14 +406,21 @@ def calibrate(
     tab["_RAJ2000"].unit = "deg"
     tab["_DEJ2000"].unit = "deg"
 
-    mask = tab["e_mag"] < 0.05
-    copy_tab = tab[mask].copy()
+    copy_tab = tab.copy()
+    if obs_limits is not None:
+        for key in obs_limits.keys():
+            mask = eval(f"copy_tab['{key}'] {obs_limits[key]}")
+            copy_tab = copy_tab[mask]
+    if len(copy_tab) <= 1:
+        print("There are no sources that satisfy your obs limits criteria.")
+        raise ValueError("No sources found in your data.")
+
     if len(copy_tab) > 150:
         copy_tab.sort("mag")
         copy_tab = copy_tab[:150]
     else:
         copy_tab = copy_tab.copy()
-    print("Total matching: ", mask.sum())
+
 
     catalog = Vizier(
         catalog=vizier_catalog,
@@ -437,10 +445,10 @@ def calibrate(
         mag_difs.append(catalog[band][i].data - tab["mag"][mask].data)
 
     mag_difs = np.asarray(mag_difs)
-    _, median_ZP, std_ZP = sigma_clipped_stats(mag_difs, sigma=3., maxiters=10, stdfunc="mad_std")
-    mask = np.abs(mag_difs - median_ZP) < (3.0 * std_ZP)
-    ZP = np.nanmedian(mag_difs[mask]) 
-    e_ZP = median_abs_deviation(mag_difs[mask], nan_policy="omit")
+    # _, median_ZP, std_ZP = sigma_clipped_stats(mag_difs, sigma=3., maxiters=10, stdfunc="mad_std")
+    # mask = np.abs(mag_difs - median_ZP) < (3.0 * std_ZP)
+    ZP = np.nanmedian(mag_difs) 
+    e_ZP = median_abs_deviation(mag_difs, nan_policy="omit")[0]
 
     print(f"ZP {band}: {ZP:.4f} +- {e_ZP:.4f}")
 
