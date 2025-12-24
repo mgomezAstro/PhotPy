@@ -17,6 +17,7 @@ from astropy.coordinates import SkyCoord
 from astropy.stats import sigma_clipped_stats, SigmaClip
 from astropy.modeling import models, fitting
 from astropy.utils.exceptions import AstropyUserWarning
+from astropy.visualization import simple_norm
 from photutils.aperture import (
     CircularAperture,
     aperture_photometry,
@@ -30,10 +31,20 @@ from photutils.background import (
     SExtractorBackground,
     MeanBackground,
 )
-from photutils.detection import IRAFStarFinder
+from photutils.detection import DAOStarFinder
+from photutils.profiles import RadialProfile
 from astroquery.vizier import Vizier
 
 import matplotlib.pyplot as plt
+
+
+def get_fwhm(data: np.ndarray, xycen: list[float]) -> float:
+    radii = np.arange(20)
+    rp = RadialProfile(data, xycen, radii)
+    _ = rp.gaussian_fit
+    fwhm = rp.gaussian_fwhm
+
+    return fwhm
 
 
 class PhotPy:
@@ -47,7 +58,7 @@ class PhotPy:
         self.hdr = fits.getheader(self.input_file, ext=ext)
         self.data_err = np.zeros_like(self.data)
         self.data_bkg = np.zeros_like(self.data)
-        self.sources = None
+        self.sources: None | Table = None
 
     def get_background(
         self,
@@ -122,146 +133,80 @@ class PhotPy:
         self,
         threshold: float = 5.0,
         fwhm: float = 5.5,
-        sharplo: float = 0.5,
-        sharphi: float = 2.0,
-        roundlo: float = 0.0,
-        roundhi: float = 0.2,
+        **kwargs,
     ):
         _, _, std = sigma_clipped_stats(
-            self.data - self.data_bkg, sigma=3.0, stdfunc="mad_std"
+            self.data - self.data_bkg, sigma=3.0
         )
-        starfinder = IRAFStarFinder(
-            threshold * std,
-            fwhm,
-            sharphi=sharphi,
-            sharplo=sharplo,
-            exclude_border=True,
-            roundhi=roundhi,
-            roundlo=roundlo,
+        starfinder = DAOStarFinder(
+            threshold = threshold * std,
+            fwhm = fwhm,
+            **kwargs,
         )
         self.sources = starfinder(self.data - self.data_bkg)
         if self.sources is None:
             raise ValueError(
                 "Did not found any source in the field. Try another get_field_sources configuration."
             )
-        self.sources["mjd"] = Time(self.hdr["DATE-OBS"]).mjd
+
+        print(f"Total sources found: {len(self.sources)}.")
+        if "DATE-OBS" in self.hdr.keys():
+            self.sources["mjd"] = Time(self.hdr["DATE-OBS"]).mjd
+        elif "DATE_OBS" in self.hdr.keys():
+            self.sources["mjd"] = Time(self.hdr["DATE_OBS"]).mjd
+        elif "MJD-OBS" in self.hdr.keys():
+            self.sources["mjd"] = float(self.hdr["MJD-OBS"])
+        else:
+            raise ValueError("Not DATE-OBS or DATE_OBS or MJD-OBS found in header.")
+
 
         positions = np.transpose([self.sources["xcentroid"], self.sources["ycentroid"]])
         apers = CircularAperture(positions, r=5.0)
-        median = np.nanmedian(self.data)
-        stddev = np.nanstd(self.data)
+        # median = np.nanmedian(self.data)
+        # stddev = np.nanstd(self.data)
+        norm = simple_norm(self.data, "log", percent=99.0)
         plt.imshow(
             self.data,
             origin="lower",
-            vmin=median - 0.5 * stddev,
-            vmax=median + 0.5 * stddev,
+            norm=norm,
         )
         apers.plot(color="red", alpha=0.5, lw=1.0)
         plt.xlabel("x [pixels]")
         plt.ylabel("y [pixels]")
-        plt.savefig(self.input_file.replace(".fits", "_findsources.png"))
+        plt.savefig(self.input_file.replace(".fits", "_findsources.pdf"))
         plt.close()
 
-    def __cog(self, aper_min: float, aper_max: float, n_aper: int, aper_id: int):
-        positions = np.transpose(
-            (
-                self.sources["ycentroid"],
-                self.sources["xcentroid"],
-            )
-        )
-        radii = np.linspace(aper_min, aper_max, n_aper)
-        apertures = [CircularAperture(positions, r) for r in radii]
 
-        phot = aperture_photometry(self.data - self.data_bkg, apertures)
+    def _get_fwhm(self):
+        bkg_fitter = SExtractorBackground()
+        bkg = Background2D(self.data, (64, 64), bkg_estimator=bkg_fitter)
+        data_bkgsub = self.data - bkg.background
+        
+        all_fwhm = []
+        for source in self.sources[:15]:
+            xycen = [source["xcentroid"], source["ycentroid"]]
+            all_fwhm.append(get_fwhm(data_bkgsub, xycen))
 
-        mk = np.asarray([])
-        rk = np.asarray([radii[i] + radii[i - 1] for i in range(1, len(radii))]) / 2.0
+        _, fwhm_median, _ = sigma_clipped_stats(all_fwhm, sigma=2.0)
 
-        xx = []
-        yy = []
-        for i in range(1, len(apertures)):
-            tmp_radius = 0.5 * (radii[i] + radii[i - 1])
-            mag_1 = -2.5 * np.log10(phot[f"aperture_sum_{i}"])
-            mag_2 = -2.5 * np.log10(phot[f"aperture_sum_{i-1}"])
-            diffmags = mag_1 - mag_2
-            diffmags[diffmags > 0.0] = np.nan
-            yy.append(diffmags.data)
-            xx.append([tmp_radius] * len(diffmags))
-            mk = np.r_[mk, np.nanmedian(diffmags)]
+        return fwhm_median
 
-        # fitting a Moffat function to curve-of-growth
-        moffat = models.Moffat1D(amplitude=mk[0], x_0=0.0, fixed={"x_0": True})
-        fitter = fitting.LMLSQFitter(calc_uncertainties=True)
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message="The fit may be unsuccessful",
-                category=AstropyUserWarning,
-            )
-            moffat_fit = fitter(moffat, rk, mk)
 
-        # for i in range(len(xx)):
-        #     plt.scatter(xx[i], yy[i], c="k")
-        # plt.scatter(rk, mk)
-        # print(sum(mk[aper_id - 1 : :]))
-
-        # # Plotting the model
-        # x_model = np.linspace(min(rk), max(rk), 100)
-        # plt.plot(x_model, moffat_fit(x_model), "r")
-        # plt.xlabel(r"$(r_{k} + r_{k-1}) / 2$")
-        # plt.ylabel(r"$m_{k} - m_{k-1}$")
-        # plt.show()
-
-        return moffat_fit, radii[aper_id]
-
-    def get_cog_photometry(
-        self,
-        phot_type: str = "aperture",
-        aper_min: float = 1.5,
-        aper_max: float = 20,
-        n_aper: int = 10,
-        aper_id: int = 3,
-    ):
-        aper_corr_fn, aper = self.__cog(aper_min, aper_max, n_aper, aper_id)
+    def get_aperture_photometry(self, aper: float = None, annulus: list = None):
+        fwhm = self._get_fwhm()
+        print(f"Detection FWHM: {fwhm:.2f}")
         positions = np.transpose((self.sources["xcentroid"], self.sources["ycentroid"]))
-
-        # TODO: implement PSF photometry
-        if phot_type == "aperture":
-            circular_aperture = CircularAperture(positions, aper)
-            phot = aperture_photometry(
-                self.data - self.data_bkg,
-                circular_aperture,
-                error=self.data_err,
-            )
-            flux = phot["aperture_sum"] / float(self.hdr["EXPTIME"])
-            e_flux = phot["aperture_sum_err"] / float(self.hdr["EXPTIME"])
-            mag = -2.5 * np.log10(flux)
-            e_mag = 0.434 * e_flux / flux
-        else:
-            raise ValueError(f"No recognized phot_tyoe. Your input: {phot_type}")
-
-        x_model = np.linspace(aper, 60, 1000)
-        aper_corr = np.trapezoid(aper_corr_fn(x_model), x_model)
-
-        self.sources["mag"] = mag + aper_corr
-        self.sources["e_mag"] = e_mag
-        self.sources["flux"] = flux
-        self.sources["e_flux"] = e_flux
-
-    def get_simple_photometry(self, aper: float = None, annulus: list = None):
-        fwhm = np.nanmedian(self.sources["fwhm"])
-        print(f"Global FWHM: {fwhm:.2f}")
-        positions = np.transpose((self.sources["xcentroid"], self.sources["ycentroid"]))
-        aper_pix = CircularAperture(positions, fwhm * 1.5)
-        aper_annulus_pix = CircularAnnulus(positions, fwhm * 2.5, fwhm * 4.0)
+        aper_pix = CircularAperture(positions, fwhm * 2.5)
+        aper_annulus_pix = CircularAnnulus(positions, fwhm * 3.0, fwhm * 4.0)
 
         if aper is not None:
+            print("Setting user aperture instead of 2.5*FWHM.")
             aper_pix = CircularAperture(positions, aper)
             aper_annulus_pix = CircularAnnulus(positions, annulus[0], annulus[1])
 
-        sigclip = SigmaClip(sigma=3.0)
-        aper_stats = ApertureStats(self.data, aper_pix, sigma_clip=None)
-        bkg_stats = ApertureStats(self.data, aper_annulus_pix, sigma_clip=sigclip)
+        sigclip = SigmaClip(sigma=3.0, maxiters=10)
+        aper_stats = ApertureStats(self.data - self.data_bkg, aper_pix, sigma_clip=None)
+        bkg_stats = ApertureStats(self.data - self.data_bkg, aper_annulus_pix, sigma_clip=sigclip)
 
         total_bkg = bkg_stats.median * aper_stats.sum_aper_area.value
         aper_sum_bksub = aper_stats.sum - total_bkg
@@ -289,6 +234,20 @@ class PhotPy:
         self.sources["flux"] = flux
         self.sources["e_flux"] = e_flux
         self.sources["bkg"] = total_bkg
+
+        norm = simple_norm(self.data, "log", percent=99.0)
+        plt.imshow(
+            self.data,
+            origin="lower",
+            norm=norm,
+        )
+        aper_pix.plot(color="red", alpha=0.5, lw=1.0)
+        aper_annulus_pix.plot(color="blue", alpha=0.5, lw=1.0)
+        plt.xlabel("x [pixels]")
+        plt.ylabel("y [pixels]")
+        plt.savefig(self.input_file.replace(".fits", "_findsources.pdf"))
+        plt.close()
+
 
     def pix_to_wcs(self):
         positions = np.transpose((self.sources["xcentroid"], self.sources["ycentroid"]))
@@ -320,14 +279,11 @@ class PhotPy:
         if make_report:
             pass
 
-    def run_pipe(self, phot_type: str = "simple"):
-        if phot_type == "simple":
-            self.get_field_sources()
-            self.get_simple_photometry()
-        else:
-            self.get_background(bkg_type="median_bkg", box_size=(15, 15))
-            self.get_field_sources()
-            self.get_cog_photometry()
+    def run_pipe(self, remove_background: bool = False):
+        if remove_background:
+            self.get_background()
+        self.get_field_sources()
+        self.get_aperture_photometry()
         self.pix_to_wcs()
         self.save()
 
@@ -338,8 +294,9 @@ def calibrate(
     band: str,
     constrains: dict,
     coords: tuple | list,
-    plot_obj: bool = False,
-    fitsfile: str = None,
+    use_pol_fit: bool = False,
+    obs_limits: dict | None = None,
+    # color_term : None | str = None,
 ):
     """
 
@@ -376,14 +333,14 @@ def calibrate(
     tab["_RAJ2000"].unit = "deg"
     tab["_DEJ2000"].unit = "deg"
 
-    mask = tab["e_mag"] < 0.05
-    copy_tab = tab[mask].copy()
-    if len(copy_tab) > 150:
-        copy_tab.sort("mag")
-        copy_tab = copy_tab[:150]
-    else:
-        copy_tab = copy_tab.copy()
-    print("Total matching: ", mask.sum())
+    copy_tab = tab.copy()
+    if obs_limits is not None:
+        for key in obs_limits.keys():
+            mask = eval(f"copy_tab['{key}'] {obs_limits[key]}")
+            copy_tab = copy_tab[mask]
+        if len(copy_tab) <= 1:
+            print("There are no sources that satisfy your obs limits criteria.")
+            raise ValueError("No sources found in your data.")
 
     catalog = Vizier(
         catalog=vizier_catalog,
@@ -407,12 +364,41 @@ def calibrate(
         catalog["e_mag"][i] = tab["e_mag"][mask]
         mag_difs.append(catalog[band][i].data - tab["mag"][mask].data)
 
-    ZP = np.nanmedian(mag_difs)
-    e_ZP = median_abs_deviation(mag_difs, nan_policy="omit")[0]
+    mag_difs = np.asarray(mag_difs)
+    _, median_ZP, std_ZP = sigma_clipped_stats(mag_difs, sigma=3., maxiters=10, stdfunc="mad_std")
+    mask = np.abs(mag_difs - median_ZP) < (3.0 * std_ZP)
+    ZP = np.nanmedian(mag_difs[mask]) 
+    e_ZP = median_abs_deviation(mag_difs[mask], nan_policy="omit")
 
     print(f"ZP {band}: {ZP:.4f} +- {e_ZP:.4f}")
 
-    tab["m_" + band] = tab["mag"] + ZP
+    # if color_term is not None:
+    #     print(f"Calculating the color term using: {band} - {color_term}")
+    #     x_axis_fit = catalog[band] - catalog[color_term]
+    #     y_axis_fit = catalog[band] - catalog["mag"] - ZP
+    #     _, median_y, std_y = sigma_clipped_stats(y_axis_fit, stdfunc="mad_std")
+    #     mask = np.abs(y_axis_fit - median_y) < (3.0 * std_y)
+    #     mask = mask * np.abs(x_axis_fit) < 0.8
+    #     weights = 1 / np.sqrt(catalog["e_" + band] ** 2 + catalog["e_" + color_term] ** 2)
+    #     coeffs = np.polyfit(x_axis_fit[mask], y_axis_fit[mask], w = weights[mask], deg=1)
+    #     pol = np.poly1d(coeffs)
+    #     plt.scatter(x_axis_fit[mask], y_axis_fit[mask])
+    #     plt.plot(x_axis_fit[mask], pol(x_axis_fit[mask]))
+    #     plt.show()
+    #
+    #     _, ZP, e_ZP = sigma_clipped_stats(ZP - (coeffs[0] * x_axis_fit[mask] + coeffs[1]), stdfunc="mad_std")
+    #
+    #     print(f"ZP {band} (color-corrected): {ZP:.4f} +- {e_ZP:.4f}")
+
+    pol = lambda x: x
+    if use_pol_fit:
+        x_fit = catalog["mag"] + ZP
+        y_fit = catalog[band]
+        weights = 1 / catalog["e_" + band]
+        coeffs = np.polyfit(x_fit, y_fit, w=weights, deg=1)
+        pol = np.poly1d(coeffs)
+
+    tab["m_" + band] = pol(tab["mag"] + ZP)
     tab["m_" + band].info.format = ".4f"
     tab[f"e_m_{band}"] = np.sqrt(tab["e_mag"] ** 2 + e_ZP**2)
     tab[f"e_m_{band}"].info.format = ".4f"
@@ -422,7 +408,7 @@ def calibrate(
     tab["e_ZP"].info.format = ".4f"
 
     plt.errorbar(
-        catalog["mag"] + ZP,
+        pol(catalog["mag"] + ZP),
         catalog[band],
         xerr=catalog["e_mag"],
         yerr=catalog["e_" + band],
@@ -435,37 +421,13 @@ def calibrate(
     plt.xlabel(f"Inst. photometry {band} [mag]")
     plt.ylabel(f"{vizier_catalog} {band} [mag]")
     plt.legend()
-    plt.savefig(input_table.replace(".csv", "_plot.png"))
+    plt.savefig(input_table.replace(".csv", "_plot.pdf"))
     plt.close()
 
-    my_obj[band] = my_obj["mag"] + ZP
+    my_obj[band] = pol(my_obj["mag"] + ZP)
     my_obj[band].info.format = ".4f"
     my_obj[f"e_{band}"] = np.sqrt(my_obj["e_mag"] ** 2 + e_ZP**2)
     my_obj[f"e_{band}"].info.format = ".4f"
-
-    if plot_obj and fitsfile is not None:
-        data = fits.getdata(fitsfile)
-        stddev = np.nanstd(data)
-        median = np.nanmedian(data)
-
-        aper = CircularAperture(
-            ((my_obj["xcentroid"][0], my_obj["ycentroid"][0])), r=5.0
-        )
-
-        plt.imshow(
-            data,
-            origin="lower",
-            interpolation="nearest",
-            vmin=median - 0.5 * stddev,
-            vmax=median + 0.5 * stddev,
-        )
-        aper.plot(color="red", lw=1.0, alpha=0.5)
-        plt.xlim(my_obj["xcentroid"][0] - 25, my_obj["xcentroid"][0] + 25)
-        plt.ylim(my_obj["ycentroid"][0] - 25, my_obj["ycentroid"][0] + 25)
-        plt.xlabel("x [pixel]")
-        plt.ylabel("y [pixel]")
-        plt.savefig(input_table.replace(".csv", "_im+aper.png"))
-        plt.close()
 
     tab.write(
         input_table.replace(".csv", "_cal.csv"),
