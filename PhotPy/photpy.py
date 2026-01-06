@@ -253,11 +253,9 @@ def calibrate(
     vizier_catalog: str,
     band: str,
     constrains: dict,
-    coords: tuple | list,
     use_pol_fit: bool = False,
     obs_limits: dict | None = None,
-    # color_term : None | str = None,
-):
+) -> tuple:
     """
 
     Parameters
@@ -280,13 +278,6 @@ def calibrate(
     """
 
     tab = Table.read(input_table, format="ascii.csv")
-
-    tab_coords = SkyCoord(tab["ra"], tab["dec"], unit="deg")
-    my_coords = SkyCoord(coords[0], coords[1], unit="deg")
-    tab["sep"] = tab_coords.separation(my_coords).arcsec
-    mask_my_obj = tab["sep"] == tab["sep"].min()
-    my_obj = tab[mask_my_obj]
-    tab = tab[~mask_my_obj].copy()
 
     tab["_RAJ2000"] = tab["ra"]
     tab["_DEJ2000"] = tab["dec"]
@@ -332,24 +323,6 @@ def calibrate(
 
     print(f"ZP {band}: {ZP:.4f} +- {e_ZP:.4f}")
 
-    # if color_term is not None:
-    #     print(f"Calculating the color term using: {band} - {color_term}")
-    #     x_axis_fit = catalog[band] - catalog[color_term]
-    #     y_axis_fit = catalog[band] - catalog["mag"] - ZP
-    #     _, median_y, std_y = sigma_clipped_stats(y_axis_fit, stdfunc="mad_std")
-    #     mask = np.abs(y_axis_fit - median_y) < (3.0 * std_y)
-    #     mask = mask * np.abs(x_axis_fit) < 0.8
-    #     weights = 1 / np.sqrt(catalog["e_" + band] ** 2 + catalog["e_" + color_term] ** 2)
-    #     coeffs = np.polyfit(x_axis_fit[mask], y_axis_fit[mask], w = weights[mask], deg=1)
-    #     pol = np.poly1d(coeffs)
-    #     plt.scatter(x_axis_fit[mask], y_axis_fit[mask])
-    #     plt.plot(x_axis_fit[mask], pol(x_axis_fit[mask]))
-    #     plt.show()
-    #
-    #     _, ZP, e_ZP = sigma_clipped_stats(ZP - (coeffs[0] * x_axis_fit[mask] + coeffs[1]), stdfunc="mad_std")
-    #
-    #     print(f"ZP {band} (color-corrected): {ZP:.4f} +- {e_ZP:.4f}")
-
     pol = lambda x: x
     if use_pol_fit:
         x_fit = catalog["mag"] + ZP
@@ -384,18 +357,11 @@ def calibrate(
     plt.savefig(input_table.replace(".csv", "_plot.png"))
     plt.close()
 
-    my_obj[band] = pol(my_obj["mag"] + ZP)
-    my_obj[band].info.format = ".4f"
-    my_obj[f"e_{band}"] = np.sqrt(my_obj["e_mag"] ** 2 + e_ZP**2)
-    my_obj[f"e_{band}"].info.format = ".4f"
-
     tab.write(
         input_table.replace(".csv", "_cal.csv"),
         overwrite=True,
         format="ascii.csv",
     )
-    my_obj.write(
-        input_table.replace(".csv", "_obj_cal.csv"),
-        overwrite=True,
-        format="ascii.csv",
-    )
+
+    return ZP, e_ZP
+
