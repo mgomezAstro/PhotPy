@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "setuptools_scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "PhotPy"
+version = "0.1.0b"
+authors = [
+    { name="Marco A. Gómez-Muñoz", email="mgomez@icc.ub.edu" },
+]
+description = "Package to obtain simple calibrated aperture photometry."
+requires-python = ">=3.9"
+
