@@ -8,19 +8,15 @@ Created on Sat Aug 17 17:28:36 2024
 """
 import numpy as np
 from scipy.stats import median_abs_deviation
-import warnings
 from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.time import Time
 from astropy.table import Table
 from astropy.coordinates import SkyCoord
 from astropy.stats import sigma_clipped_stats, SigmaClip
-from astropy.modeling import models, fitting
-from astropy.utils.exceptions import AstropyUserWarning
 from astropy.visualization import simple_norm
 from photutils.aperture import (
     CircularAperture,
-    aperture_photometry,
     CircularAnnulus,
     ApertureStats,
 )
@@ -159,24 +155,6 @@ class PhotPy:
         else:
             raise ValueError("Not DATE-OBS or DATE_OBS or MJD-OBS found in header.")
 
-
-        positions = np.transpose([self.sources["xcentroid"], self.sources["ycentroid"]])
-        apers = CircularAperture(positions, r=5.0)
-        # median = np.nanmedian(self.data)
-        # stddev = np.nanstd(self.data)
-        norm = simple_norm(self.data, "log", percent=99.0)
-        plt.imshow(
-            self.data,
-            origin="lower",
-            norm=norm,
-        )
-        apers.plot(color="red", alpha=0.5, lw=1.0)
-        plt.xlabel("x [pixels]")
-        plt.ylabel("y [pixels]")
-        plt.savefig(self.input_file.replace(".fits", "_findsources.pdf"))
-        plt.close()
-
-
     def _get_fwhm(self):
         bkg_fitter = SExtractorBackground()
         bkg = Background2D(self.data, (64, 64), bkg_estimator=bkg_fitter)
@@ -235,20 +213,6 @@ class PhotPy:
         self.sources["e_flux"] = e_flux
         self.sources["bkg"] = total_bkg
 
-        norm = simple_norm(self.data, "log", percent=99.0)
-        plt.imshow(
-            self.data,
-            origin="lower",
-            norm=norm,
-        )
-        aper_pix.plot(color="red", alpha=0.5, lw=1.0)
-        aper_annulus_pix.plot(color="blue", alpha=0.5, lw=1.0)
-        plt.xlabel("x [pixels]")
-        plt.ylabel("y [pixels]")
-        plt.savefig(self.input_file.replace(".fits", "_findsources.pdf"))
-        plt.close()
-
-
     def pix_to_wcs(self):
         positions = np.transpose((self.sources["xcentroid"], self.sources["ycentroid"]))
 
@@ -260,7 +224,7 @@ class PhotPy:
         self.sources["ra"] = ra
         self.sources["dec"] = dec
 
-    def save(self, make_report: bool = True):
+    def save(self):
         remove_mask_nans = np.isnan(self.sources["mag"])
         self.sources = self.sources[~remove_mask_nans]
         for col in self.sources.colnames:
@@ -274,10 +238,6 @@ class PhotPy:
             format="ascii.csv",
             overwrite=True,
         )
-
-        # TODO: Make a reportlab PDF document
-        if make_report:
-            pass
 
     def run_pipe(self, remove_background: bool = False):
         if remove_background:
@@ -421,7 +381,7 @@ def calibrate(
     plt.xlabel(f"Inst. photometry {band} [mag]")
     plt.ylabel(f"{vizier_catalog} {band} [mag]")
     plt.legend()
-    plt.savefig(input_table.replace(".csv", "_plot.pdf"))
+    plt.savefig(input_table.replace(".csv", "_plot.png"))
     plt.close()
 
     my_obj[band] = pol(my_obj["mag"] + ZP)
