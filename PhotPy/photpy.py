@@ -268,8 +268,6 @@ def calibrate(
         Name of the filter band as in the original Vizier catalog.
     constrains: dict,
         Dictnioary of constrains (e.g., {"Jmag": ">12"}). Column names must coincide with those in Vizier table.
-    coords : tuple | list
-        A pair of ra and dec coordinates of your object in degrees. This object will be excluded during the calculation of the zero-point.
 
     Returns
     -------
@@ -300,7 +298,7 @@ def calibrate(
     ).query_region(copy_tab, radius="3s")[0]
     catalog = catalog[~np.isnan(catalog[band])]
     catalog = catalog[~np.isnan(catalog["e_" + band])]
-    catalog.write("ref_" + input_table, format="ascii.csv", overwrite=True)
+    catalog.write(input_table.replace(".csv", "_ref.csv"), format="ascii.csv", overwrite=True)
     print("Total ref sources: ", len(catalog))
 
     c_tab = SkyCoord(tab["ra"], tab["dec"], unit="deg")
