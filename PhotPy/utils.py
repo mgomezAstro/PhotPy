@@ -14,6 +14,6 @@ def plot_sources(catalog, fitsfile, centered_on=None, radius=2.0, ra_col="ra", d
         fig.recenter(centered_on[0], centered_on[1], radius=radius / 60.)
 
     fig.show_grayscale(invert=True)
-    fig.save(fitsfile.replace(".fits", "_cat.png"))
+    fig.save(catalog.replace(".csv", "_cat_plot.png"))
     fig.close()
     

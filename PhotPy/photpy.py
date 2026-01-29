@@ -14,7 +14,6 @@ from astropy.time import Time
 from astropy.table import Table
 from astropy.coordinates import SkyCoord
 from astropy.stats import sigma_clipped_stats, SigmaClip
-from astropy.visualization import simple_norm
 from photutils.aperture import (
     CircularAperture,
     CircularAnnulus,
@@ -22,14 +21,12 @@ from photutils.aperture import (
 )
 from photutils.background import (
     Background2D,
-    MedianBackground,
-    MMMBackground,
     SExtractorBackground,
-    MeanBackground,
 )
 from photutils.detection import DAOStarFinder
 from photutils.profiles import RadialProfile
 from astroquery.vizier import Vizier
+from astroquery.gaia import Gaia
 
 import matplotlib.pyplot as plt
 
@@ -58,72 +55,21 @@ class PhotPy:
 
     def get_background(
         self,
-        bkg_type: str = "median_bkg",
         box_size: tuple = (10, 10),
         filter_size: tuple = (3, 3),
     ):
-        bkg_options = [
-            "sigma_clip",
-            "mean_bkg",
-            "median_bkg",
-            "sextractor_bkg",
-            "mmm_bkg",
-        ]
 
-        if bkg_type == "sigma_clip":
-            _, bkg, bkg_std = sigma_clipped_stats(self.data, sigma=3.0)
-            self.data_bkg += bkg
-            self.data_err += bkg_std
-        elif bkg_type == "mean_bkg":
-            sigma_clip = SigmaClip(sigma=3.0)
-            bkg_estimator = MeanBackground()
-            bkg_2d = Background2D(
-                self.data,
-                box_size,
-                filter_size=filter_size,
-                sigma_clip=sigma_clip,
-                bkg_estimator=bkg_estimator,
-            )
-            self.data_bkg += bkg_2d.background
-            self.data_err += bkg_2d.background_rms
-        elif bkg_type == "median_bkg":
-            sigma_clip = SigmaClip(sigma=3.0)
-            bkg_estimator = MedianBackground()
-            bkg_2d = Background2D(
-                self.data,
-                box_size,
-                filter_size=filter_size,
-                sigma_clip=sigma_clip,
-                bkg_estimator=bkg_estimator,
-            )
-            self.data_bkg += bkg_2d.background
-            self.data_err += bkg_2d.background_rms
-        elif bkg_type == "sextractor_bkg":
-            sigma_clip = SigmaClip(sigma=3.0)
-            bkg_estimator = SExtractorBackground()
-            bkg_2d = Background2D(
-                self.data,
-                box_size,
-                filter_size=filter_size,
-                sigma_clip=sigma_clip,
-                bkg_estimator=bkg_estimator,
-            )
-            self.data_bkg += bkg_2d.background
-            self.data_err += bkg_2d.background_rms
-        elif bkg_type == "mmm_bkg":
-            sigma_clip = SigmaClip(sigma=3.0)
-            bkg_estimator = MMMBackground()
-            bkg_2d = Background2D(
-                self.data,
-                box_size,
-                filter_size=filter_size,
-                sigma_clip=sigma_clip,
-                bkg_estimator=bkg_estimator,
-            )
-            self.data_bkg += bkg_2d.background
-            self.data_err += bkg_2d.background_rms
-        else:
-            raise ValueError(f"Background must be one of this: {bkg_options}.")
+        sigma_clip = SigmaClip(sigma=3.0)
+        bkg_estimator = SExtractorBackground()
+        bkg_2d = Background2D(
+            self.data,
+            box_size,
+            filter_size=filter_size,
+            sigma_clip=sigma_clip,
+            bkg_estimator=bkg_estimator,
+        )
+        self.data_bkg += bkg_2d.background
+        self.data_err += bkg_2d.background_rms
 
     def get_field_sources(
         self,
@@ -131,12 +77,10 @@ class PhotPy:
         fwhm: float = 5.5,
         **kwargs,
     ):
-        _, _, std = sigma_clipped_stats(
-            self.data - self.data_bkg, sigma=3.0
-        )
+        _, _, std = sigma_clipped_stats(self.data - self.data_bkg, sigma=3.0)
         starfinder = DAOStarFinder(
-            threshold = threshold * std,
-            fwhm = fwhm,
+            threshold=threshold * std,
+            fwhm=fwhm,
             **kwargs,
         )
         self.sources = starfinder(self.data - self.data_bkg)
@@ -153,13 +97,13 @@ class PhotPy:
         elif "MJD-OBS" in self.hdr.keys():
             self.sources["mjd"] = float(self.hdr["MJD-OBS"])
         else:
-            raise ValueError("Not DATE-OBS or DATE_OBS or MJD-OBS found in header.")
+            self.sources["mjd"] = 0.0
 
     def _get_fwhm(self):
         bkg_fitter = SExtractorBackground()
         bkg = Background2D(self.data, (64, 64), bkg_estimator=bkg_fitter)
         data_bkgsub = self.data - bkg.background
-        
+
         all_fwhm = []
         for source in self.sources[:15]:
             xycen = [source["xcentroid"], source["ycentroid"]]
@@ -168,7 +112,6 @@ class PhotPy:
         _, fwhm_median, _ = sigma_clipped_stats(all_fwhm, sigma=2.0)
 
         return fwhm_median
-
 
     def get_aperture_photometry(self, aper: float = None, annulus: list = None):
         fwhm = self._get_fwhm()
@@ -184,7 +127,9 @@ class PhotPy:
 
         sigclip = SigmaClip(sigma=3.0, maxiters=10)
         aper_stats = ApertureStats(self.data - self.data_bkg, aper_pix, sigma_clip=None)
-        bkg_stats = ApertureStats(self.data - self.data_bkg, aper_annulus_pix, sigma_clip=sigclip)
+        bkg_stats = ApertureStats(
+            self.data - self.data_bkg, aper_annulus_pix, sigma_clip=sigclip
+        )
 
         total_bkg = bkg_stats.median * aper_stats.sum_aper_area.value
         aper_sum_bksub = aper_stats.sum - total_bkg
@@ -192,6 +137,8 @@ class PhotPy:
         gain = 1.0
         if "GAIN" in self.hdr:
             gain = float(self.hdr["GAIN"])
+        if "EXPTIME" not in self.hdr:
+            self.hdr["EXPTIME"] = 1.0
         flux = gain * aper_sum_bksub / float(self.hdr["EXPTIME"])
         mag = -2.5 * np.log10(flux)
 
@@ -253,6 +200,7 @@ def calibrate(
     vizier_catalog: str,
     band: str,
     constrains: dict,
+    radius: float = 3.0,
     use_pol_fit: bool = False,
     obs_limits: dict | None = None,
 ) -> tuple:
@@ -295,10 +243,12 @@ def calibrate(
         catalog=vizier_catalog,
         column_filters=constrains,
         columns=["all", "_RAJ2000", "_DEJ2000"],
-    ).query_region(copy_tab, radius="3s")[0]
+    ).query_region(copy_tab, radius=f"{radius}s")[0]
     catalog = catalog[~np.isnan(catalog[band])]
     catalog = catalog[~np.isnan(catalog["e_" + band])]
-    catalog.write(input_table.replace(".csv", "_ref.csv"), format="ascii.csv", overwrite=True)
+    catalog.write(
+        input_table.replace(".csv", "_ref.csv"), format="ascii.csv", overwrite=True
+    )
     print("Total ref sources: ", len(catalog))
 
     c_tab = SkyCoord(tab["ra"], tab["dec"], unit="deg")
@@ -314,9 +264,11 @@ def calibrate(
         mag_difs.append(catalog[band][i].data - tab["mag"][mask].data)
 
     mag_difs = np.asarray(mag_difs)
-    _, median_ZP, std_ZP = sigma_clipped_stats(mag_difs, sigma=3., maxiters=10, stdfunc="mad_std")
+    _, median_ZP, std_ZP = sigma_clipped_stats(
+        mag_difs, sigma=3.0, maxiters=10, stdfunc="mad_std"
+    )
     mask = np.abs(mag_difs - median_ZP) < (3.0 * std_ZP)
-    ZP = np.nanmedian(mag_difs[mask]) 
+    ZP = np.nanmedian(mag_difs[mask])
     e_ZP = median_abs_deviation(mag_difs[mask], nan_policy="omit")
 
     print(f"ZP {band}: {ZP:.4f} +- {e_ZP:.4f}")
@@ -363,3 +315,96 @@ def calibrate(
 
     return ZP, e_ZP
 
+
+def calibrate_gaia(
+    input_table: str,
+    band: str,
+    constrains: dict = {"e_Gmag": "0.005"},
+    radius: float = 2.0,
+    obs_limits: dict | None = None,
+):
+
+    tab = Table.read(input_table, format="ascii.csv")
+
+    tab["_RAJ2000"] = tab["ra"]
+    tab["_DEJ2000"] = tab["dec"]
+    tab["_RAJ2000"].unit = "deg"
+    tab["_DEJ2000"].unit = "deg"
+
+    copy_tab = tab.copy()
+    if obs_limits is not None:
+        for key in obs_limits.keys():
+            mask = eval(f"copy_tab['{key}'] {obs_limits[key]}")
+            copy_tab = copy_tab[mask]
+        if len(copy_tab) <= 1:
+            print("There are no sources that satisfy your obs limits criteria.")
+            raise ValueError("No sources found in your data.")
+
+    catalog = Vizier(
+        catalog="I/355/gaiadr3",
+        column_filters=constrains,
+        columns=["+_r", "Source", "Gmag", "e_Gmag"],
+    ).query_region(copy_tab, radius=f"{radius}s")[0]
+    catalog.write(
+        input_table.replace(".csv", "_ref.csv"), format="ascii.csv", overwrite=True
+    )
+    print("Total GaiaDR3 sources: ", len(catalog))
+
+    catalog["_r"].name = "sep"
+    catalog["_q"].name = "match"
+
+    query = f"""
+    SELECT my.*, gsyn.source_id, gsyn.c_star, gsyn.{band}_mag, gsyn.{band}_flag
+    FROM gaiadr3.synthetic_photometry_gspc gsyn
+    RIGHT JOIN tap_upload.catalog my
+    ON my.Source = gsyn.source_id
+    WHERE gsyn.{band}_flag = 1
+    """
+
+    job = Gaia.launch_job_async(
+        query,
+        upload_resource=catalog,
+        upload_table_name="catalog",
+        verbose=True,
+    )
+
+    synth_phot = job.get_results()
+
+    copy_tab[band] = -99.0
+    copy_tab["e_" + band] = -99.0
+    for i in range(len(synth_phot)):
+        match_id = synth_phot["match"][i] - 1
+        copy_tab[band][match_id] = synth_phot[f"{band}_mag"][i]
+        copy_tab["e_" + band][match_id] = copy_tab["e_mag"][match_id]
+    mask_valid = copy_tab[band] > -90.0
+    copy_tab = copy_tab[mask_valid]
+
+    mag_difs = np.asarray(copy_tab[band] - copy_tab["mag"])
+
+    _, median_ZP, std_ZP = sigma_clipped_stats(
+        mag_difs, sigma=3.0, maxiters=10, stdfunc="mad_std"
+    )
+    mask = np.abs(mag_difs - median_ZP) < (3.0 * std_ZP)
+    ZP = np.nanmedian(mag_difs[mask])
+    e_ZP = median_abs_deviation(mag_difs[mask], nan_policy="omit")
+
+    print(f"ZP {band}: {ZP:.4f} +- {e_ZP:.4f}")
+
+    plt.errorbar(
+        copy_tab["mag"] + ZP,
+        copy_tab[band],
+        xerr=copy_tab["e_mag"],
+        yerr=copy_tab["e_" + band],
+        marker="o",
+        ls="",
+        label=f"{band} (ZP = {ZP:.2f}+-{e_ZP:.2f})",
+    )
+    xx = [copy_tab[band].min(), copy_tab[band].max()]
+    plt.plot(xx, xx, color="red", lw=1.0, label=f"1:1 ")
+    plt.xlabel(f"Inst. photometry {band} [mag]")
+    plt.ylabel(f"Gaia Synthetic {band} [mag]")
+    plt.legend()
+    plt.savefig(input_table.replace(".csv", "_plot.png"))
+    plt.close()
+
+    return ZP, e_ZP
