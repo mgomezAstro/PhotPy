@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "PhotPy"
-version = "0.3.8b"
+version = "0.3.13b"
 authors = [
     { name="Marco A. Gómez-Muñoz", email="mgomez@icc.ub.edu" },
 ]

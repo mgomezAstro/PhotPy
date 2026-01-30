@@ -12,8 +12,8 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.time import Time
 from astropy.table import Table
-from astropy.coordinates import SkyCoord
 from astropy.stats import sigma_clipped_stats, SigmaClip
+import astropy.units as u
 from photutils.aperture import (
     CircularAperture,
     CircularAnnulus,
@@ -25,7 +25,7 @@ from photutils.background import (
 )
 from photutils.detection import DAOStarFinder
 from photutils.profiles import RadialProfile
-from astroquery.vizier import Vizier
+from astroquery.xmatch import XMatch
 from astroquery.gaia import Gaia
 
 import matplotlib.pyplot as plt
@@ -239,31 +239,23 @@ def calibrate(
             print("There are no sources that satisfy your obs limits criteria.")
             raise ValueError("No sources found in your data.")
 
-    catalog = Vizier(
-        catalog=vizier_catalog,
-        column_filters=constrains,
-        columns=["all", "_RAJ2000", "_DEJ2000"],
-    ).query_region(copy_tab, radius=f"{radius}s")[0]
-    catalog = catalog[~np.isnan(catalog[band])]
-    catalog = catalog[~np.isnan(catalog["e_" + band])]
-    catalog.write(
-        input_table.replace(".csv", "_ref.csv"), format="ascii.csv", overwrite=True
+    catalog = XMatch.query(
+        cat1=copy_tab,
+        cat2=f"vizier:{vizier_catalog}",
+        max_distance=radius * u.arcsec,
+        colRA1="_RAJ2000",
+        colDec1="_DEJ2000",
     )
-    print("Total ref sources: ", len(catalog))
+    catalog["angDist"].name = "sep"
 
-    c_tab = SkyCoord(tab["ra"], tab["dec"], unit="deg")
-    mag_difs = []
-    catalog["mag"] = -99.0
-    catalog["e_mag"] = -99.0
-    for i in range(len(catalog)):
-        c = SkyCoord(catalog["_RAJ2000"][i], catalog["_DEJ2000"][i], unit="deg")
-        tab["sep"] = c_tab.separation(c).arcsec
-        mask = tab["sep"] == tab["sep"].min()
-        catalog["mag"][i] = tab["mag"][mask]
-        catalog["e_mag"][i] = tab["e_mag"][mask]
-        mag_difs.append(catalog[band][i].data - tab["mag"][mask].data)
+    if constrains is not None:
+        print("Applying constrains to Vizier catalog...")
+        for key in constrains.keys():
+            print(f" - {key} {constrains[key]}")
+            mask = eval(f"catalog['{key}'] {constrains[key]}")
+            catalog = catalog[mask]
 
-    mag_difs = np.asarray(mag_difs)
+    mag_difs = np.asarray(catalog[band] - catalog["mag"])
     _, median_ZP, std_ZP = sigma_clipped_stats(
         mag_difs, sigma=3.0, maxiters=10, stdfunc="mad_std"
     )
@@ -280,15 +272,6 @@ def calibrate(
         weights = 1 / catalog["e_" + band]
         coeffs = np.polyfit(x_fit, y_fit, w=weights, deg=1)
         pol = np.poly1d(coeffs)
-
-    tab["m_" + band] = pol(tab["mag"] + ZP)
-    tab["m_" + band].info.format = ".4f"
-    tab[f"e_m_{band}"] = np.sqrt(tab["e_mag"] ** 2 + e_ZP**2)
-    tab[f"e_m_{band}"].info.format = ".4f"
-    tab["ZP"] = ZP
-    tab["ZP"].info.format = ".4f"
-    tab["e_ZP"] = e_ZP
-    tab["e_ZP"].info.format = ".4f"
 
     plt.errorbar(
         pol(catalog["mag"] + ZP),
@@ -307,19 +290,13 @@ def calibrate(
     plt.savefig(input_table.replace(".csv", "_plot.png"))
     plt.close()
 
-    tab.write(
-        input_table.replace(".csv", "_cal.csv"),
-        overwrite=True,
-        format="ascii.csv",
-    )
-
     return ZP, e_ZP
 
 
 def calibrate_gaia(
     input_table: str,
     band: str,
-    constrains: dict = {"e_Gmag": "0.005"},
+    constrains: dict | None = {"e_Gmag": "<0.005"},
     radius: float = 2.0,
     obs_limits: dict | None = None,
 ):
@@ -340,18 +317,28 @@ def calibrate_gaia(
             print("There are no sources that satisfy your obs limits criteria.")
             raise ValueError("No sources found in your data.")
 
-    catalog = Vizier(
-        catalog="I/355/gaiadr3",
-        column_filters=constrains,
-        columns=["+_r", "Source", "Gmag", "e_Gmag"],
-    ).query_region(copy_tab, radius=f"{radius}s")[0]
-    catalog.write(
-        input_table.replace(".csv", "_ref.csv"), format="ascii.csv", overwrite=True
+    catalog = XMatch.query(
+        cat1=copy_tab,
+        cat2="vizier:I/355/gaiadr3",
+        max_distance=radius * u.arcsec,
+        colRA1="_RAJ2000",
+        colDec1="_DEJ2000",
     )
+
     print("Total GaiaDR3 sources: ", len(catalog))
 
-    catalog["_r"].name = "sep"
-    catalog["_q"].name = "match"
+    catalog["angDist"].name = "sep"
+    catalog = catalog[["Source", "Gmag", "e_Gmag", "sep", "mag", "e_mag"]]
+
+    if constrains is not None:
+        print("Applying constrains to Gaia catalog...")
+        for key in constrains.keys():
+            print(f" - {key} {constrains[key]}")
+            mask = eval(f"catalog['{key}'] {constrains[key]}")
+            catalog = catalog[mask]
+
+    catalog_name = input_table.replace(".csv", "_ref.csv")
+    catalog.write(catalog_name, format="ascii.csv", overwrite=True)
 
     query = f"""
     SELECT my.*, gsyn.source_id, gsyn.c_star, gsyn.{band}_mag, gsyn.{band}_flag
@@ -370,16 +357,7 @@ def calibrate_gaia(
 
     synth_phot = job.get_results()
 
-    copy_tab[band] = -99.0
-    copy_tab["e_" + band] = -99.0
-    for i in range(len(synth_phot)):
-        match_id = synth_phot["match"][i] - 1
-        copy_tab[band][match_id] = synth_phot[f"{band}_mag"][i]
-        copy_tab["e_" + band][match_id] = copy_tab["e_mag"][match_id]
-    mask_valid = copy_tab[band] > -90.0
-    copy_tab = copy_tab[mask_valid]
-
-    mag_difs = np.asarray(copy_tab[band] - copy_tab["mag"])
+    mag_difs = np.asarray(synth_phot[f"{band}_mag"] - synth_phot["mag"])
 
     _, median_ZP, std_ZP = sigma_clipped_stats(
         mag_difs, sigma=3.0, maxiters=10, stdfunc="mad_std"
@@ -391,15 +369,14 @@ def calibrate_gaia(
     print(f"ZP {band}: {ZP:.4f} +- {e_ZP:.4f}")
 
     plt.errorbar(
-        copy_tab["mag"] + ZP,
-        copy_tab[band],
-        xerr=copy_tab["e_mag"],
-        yerr=copy_tab["e_" + band],
+        synth_phot["mag"] + ZP,
+        synth_phot[f"{band}_mag"],
+        xerr=synth_phot["e_mag"],
         marker="o",
         ls="",
         label=f"{band} (ZP = {ZP:.2f}+-{e_ZP:.2f})",
     )
-    xx = [copy_tab[band].min(), copy_tab[band].max()]
+    xx = [synth_phot[f"{band}_mag"].min(), synth_phot[f"{band}_mag"].max()]
     plt.plot(xx, xx, color="red", lw=1.0, label=f"1:1 ")
     plt.xlabel(f"Inst. photometry {band} [mag]")
     plt.ylabel(f"Gaia Synthetic {band} [mag]")
